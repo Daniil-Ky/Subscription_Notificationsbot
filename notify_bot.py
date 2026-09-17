@@ -33,6 +33,7 @@ import os
 import re
 import asyncio
 import logging
+from html import escape as html_escape
 
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, F
@@ -109,34 +110,53 @@ async def get_subscribers(channel_id: int) -> list[int]:
 
 async def register_channel_subscription(message: Message, channel_id: int, channel_title: str) -> None:
     bot_info = await bot.me()
+    safe_title = html_escape(channel_title)
 
     try:
         bot_member = await bot.get_chat_member(channel_id, bot_info.id)
     except Exception:
         await message.answer(
-            f"Не удалось проверить права бота в канале «{channel_title}». "
-            "Убедитесь, что бот добавлен в этот канал как администратор."
+            f"⚠️ Не удалось проверить бота в канале «<b>{safe_title}</b>».\n\n"
+            "Похоже, бота там вообще нет. Что нужно сделать:\n"
+            "1. Откройте канал → <b>Управление каналом</b> → <b>Администраторы</b>\n"
+            "2. Нажмите <b>Добавить администратора</b>\n"
+            f"3. Найдите бота (@{bot_info.username}) и добавьте его\n"
+            "4. Права можно оставить любые (галочки по умолчанию) — "
+            "боту достаточно самого статуса администратора\n\n"
+            "После этого пришлите ссылку или пересланное сообщение ещё раз.",
+            parse_mode="HTML",
         )
         return
 
     if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         await message.answer(
-            f"Бот должен быть администратором канала «{channel_title}», "
-            "чтобы присылать уведомления о новых подписчиках. "
-            "Добавьте бота в администраторы и попробуйте снова."
+            f"⚠️ Бот состоит в канале «<b>{safe_title}</b>», но не как "
+            "администратор.\n\n"
+            "Что нужно сделать:\n"
+            "1. Откройте канал → <b>Управление каналом</b> → <b>Администраторы</b>\n"
+            "2. Найдите бота в списке участников и повысьте до администратора\n"
+            "(конкретные права роли значения не имеют — важен сам статус "
+            "администратора, без него Telegram не присылает боту события "
+            "о новых подписчиках)\n\n"
+            "После этого попробуйте снова.",
+            parse_mode="HTML",
         )
         return
 
     user_id = message.from_user.id
 
     if await is_already_subscribed(channel_id, user_id):
-        await message.answer(f"Вы уже подписаны на уведомления канала «{channel_title}».")
+        await message.answer(
+            f"Вы уже подписаны на уведомления канала «<b>{safe_title}</b>».",
+            parse_mode="HTML",
+        )
         return
 
     await add_subscription(channel_id, user_id)
     await message.answer(
-        f"Готово! Теперь вы будете получать уведомления о новых "
-        f"подписчиках канала «{channel_title}»."
+        f"✅ Готово! Теперь вы будете получать уведомления о новых "
+        f"подписчиках канала «<b>{safe_title}</b>».",
+        parse_mode="HTML",
     )
 
 
@@ -147,12 +167,14 @@ async def register_channel_subscription(message: Message, channel_id: int, chann
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "Привет! Я уведомляю о новых подписчиках канала.\n\n"
-        f"Ваш Telegram ID: {message.from_user.id}\n\n"
-        "Чтобы подключить канал:\n"
+        "👋 <b>Привет!</b> Я уведомляю о новых подписчиках канала.\n\n"
+        f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n\n"
+        "<b>Чтобы подключить канал:</b>\n"
         "1. Добавьте меня в канал как администратора.\n"
         "2. Перешлите мне сюда любое сообщение из этого канала "
-        "(или пришлите ссылку вида https://t.me/username, если канал публичный)."
+        "(или пришлите ссылку вида <code>https://t.me/username</code>, "
+        "если канал публичный).",
+        parse_mode="HTML",
     )
 
 
@@ -165,18 +187,25 @@ async def on_forwarded_message(message: Message):
     await register_channel_subscription(message, chat.id, chat.title)
 
 
-@dp.message(F.text.regexp(r"t\.me/([A-Za-z0-9_]+)"))
+@dp.message(F.text.contains("t.me/"))
 async def on_channel_link(message: Message):
     match = re.search(r"t\.me/([A-Za-z0-9_]+)", message.text)
+    if not match:
+        await message.answer(
+            "Не разобрал имя канала в этой ссылке. Проверьте, что ссылка "
+            "имеет вид <code>https://t.me/имя_канала</code>.",
+            parse_mode="HTML",
+        )
+        return
     username = match.group(1)
 
     try:
         chat = await bot.get_chat(f"@{username}")
     except Exception:
         await message.answer(
-            "Не удалось найти канал по этой ссылке. Проверьте, что ссылка "
-            "верна и канал публичный (для приватных каналов перешлите "
-            "сообщение из канала вместо ссылки)."
+            "❌ Не удалось найти канал по этой ссылке. Проверьте, что "
+            "ссылка верна и канал публичный (для приватных каналов "
+            "перешлите сообщение из канала вместо ссылки)."
         )
         return
 
@@ -192,7 +221,8 @@ async def on_other_message(message: Message):
     await message.answer(
         "Чтобы подписаться на уведомления канала, перешлите мне сюда "
         "любое сообщение из этого канала, либо пришлите ссылку на "
-        "публичный канал вида https://t.me/username."
+        "публичный канал вида <code>https://t.me/username</code>.",
+        parse_mode="HTML",
     )
 
 
@@ -228,19 +258,19 @@ async def on_channel_member_update(update: ChatMemberUpdated):
 
     user = update.new_chat_member.user
     username = f"@{user.username}" if user.username else "(нет юзернейма)"
-    full_name = user.full_name or "—"
+    full_name = html_escape(user.full_name or "—")
 
     text = (
-        "🔔 Новый подписчик канала!\n\n"
+        "🔔 <b>Новый подписчик канала!</b>\n\n"
         f"Имя: {full_name}\n"
         f"Username: {username}\n"
-        f"ID: {user.id}\n"
-        f"Канал: {update.chat.title}"
+        f"ID: <code>{user.id}</code>\n"
+        f"Канал: {html_escape(update.chat.title)}"
     )
 
     for recipient_id in recipients:
         try:
-            await bot.send_message(chat_id=recipient_id, text=text)
+            await bot.send_message(chat_id=recipient_id, text=text, parse_mode="HTML")
         except Exception as e:
             logging.warning("Не удалось отправить сообщение %s: %s", recipient_id, e)
 

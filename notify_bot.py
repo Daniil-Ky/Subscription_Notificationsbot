@@ -31,24 +31,29 @@
 
 import os
 import re
+import asyncio
 import logging
 
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import ChatMemberUpdated, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-WEBHOOK_HOST = os.environ["WEBHOOK_HOST"].rstrip("/")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+SUPABASE_URL = os.environ["SUPABASE_URL"].strip().rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_KEY"].strip()
+WEBHOOK_HOST = os.environ["WEBHOOK_HOST"].strip().rstrip("/")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET or 'hook'}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+if not WEBHOOK_HOST.startswith("https://"):
+    raise RuntimeError(f"WEBHOOK_HOST должен начинаться с https:// , сейчас: {WEBHOOK_HOST!r}")
 
 PORT = int(os.environ.get("PORT", 10000))  # Render сам передаёт PORT
 
@@ -248,12 +253,21 @@ async def on_startup(app: web.Application):
     global http_session
     http_session = ClientSession()
 
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET or None,
-        allowed_updates=["message", "chat_member"],
-    )
-    logging.info("Webhook установлен: %s", WEBHOOK_URL)
+    for attempt in range(1, 6):
+        try:
+            await bot.set_webhook(
+                url=WEBHOOK_URL,
+                secret_token=WEBHOOK_SECRET or None,
+                allowed_updates=["message", "chat_member"],
+            )
+            logging.info("Webhook установлен: %s", WEBHOOK_URL)
+            return
+        except TelegramRetryAfter as e:
+            wait = e.retry_after + 2
+            logging.warning("Флуд-контроль Telegram, жду %s сек. (попытка %s/5)", wait, attempt)
+            await asyncio.sleep(wait)
+
+    logging.error("Не удалось установить webhook после 5 попыток")
 
 
 async def on_shutdown(app: web.Application):

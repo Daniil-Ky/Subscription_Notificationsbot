@@ -119,7 +119,7 @@ async def register_chat_subscription(
     chat_kind = "канале" if chat_type == "channel" else "группе"
 
     try:
-        bot_member = await bot.get_chat_member(channel_id, bot_info.id)
+        bot_member = await bot.get_chat_member(chat_id, bot_info.id)
     except Exception:
         await message.answer(
             f"⚠️ Не удалось проверить бота в {chat_kind} «<b>{safe_title}</b>».\n\n"
@@ -151,14 +151,14 @@ async def register_chat_subscription(
 
     user_id = message.from_user.id
 
-    if await is_already_subscribed(channel_id, user_id):
+    if await is_already_subscribed(chat_id, user_id):
         await message.answer(
             f"Вы уже подписаны на уведомления в {chat_kind} «<b>{safe_title}</b>».",
             parse_mode="HTML",
         )
         return
 
-    await add_subscription(channel_id, user_id)
+    await add_subscription(chat_id, user_id)
     await message.answer(
         f"✅ Готово! Теперь вы будете получать уведомления о новых "
         f"участниках в {chat_kind} «<b>{safe_title}</b>».",
@@ -175,9 +175,9 @@ async def cmd_start(message: Message):
     await message.answer(
         "👋 <b>Привет!</b> Я уведомляю о новых подписчиках канала.\n\n"
         f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n\n"
-        "<b>Чтобы подключить канал:</b>\n"
-        "1. Добавьте меня в канал как администратора.\n"
-        "2. Перешлите мне сюда любое сообщение из этого канала "
+        "<b>Чтобы подключить канал или группу:</b>\n"
+        "1. Добавьте меня в канал или группу как администратора.\n"
+        "2. Перешлите мне сюда любое сообщение из этого канала или группы "
         "(или пришлите ссылку вида <code>https://t.me/username</code>, "
         "если канал публичный).",
         parse_mode="HTML",

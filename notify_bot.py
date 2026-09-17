@@ -108,19 +108,25 @@ async def get_subscribers(channel_id: int) -> list[int]:
 # Регистрация подписки на канал (общая логика для forward и для ссылки)
 # ---------------------------------------------------------------------
 
-async def register_channel_subscription(message: Message, channel_id: int, channel_title: str) -> None:
+async def register_chat_subscription(
+    message: Message,
+    chat_id: int,
+    chat_title: str,
+    chat_type: str,
+) -> None:
     bot_info = await bot.me()
-    safe_title = html_escape(channel_title)
+    safe_title = html_escape(chat_title)
+    chat_kind = "канале" if chat_type == "channel" else "группе"
 
     try:
         bot_member = await bot.get_chat_member(channel_id, bot_info.id)
     except Exception:
         await message.answer(
-            f"⚠️ Не удалось проверить бота в канале «<b>{safe_title}</b>».\n\n"
+            f"⚠️ Не удалось проверить бота в {chat_kind} «<b>{safe_title}</b>».\n\n"
             "Похоже, бота там вообще нет. Что нужно сделать:\n"
-            "1. Откройте канал → <b>Управление каналом</b> → <b>Администраторы</b>\n"
+            "1. Откройте настройки чата → <b>Администраторы</b>\n"
             "2. Нажмите <b>Добавить администратора</b>\n"
-            f"3. Найдите бота (@{bot_info.username}) и добавьте его\n"
+            f"3. Найдите бота (@{bot_info.username}) и добавьте его как администратора\n"
             "4. Права можно оставить любые (галочки по умолчанию) — "
             "боту достаточно самого статуса администратора\n\n"
             "После этого пришлите ссылку или пересланное сообщение ещё раз.",
@@ -130,10 +136,10 @@ async def register_channel_subscription(message: Message, channel_id: int, chann
 
     if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         await message.answer(
-            f"⚠️ Бот состоит в канале «<b>{safe_title}</b>», но не как "
+            f"⚠️ Бот состоит в {chat_kind} «<b>{safe_title}</b>», но не как "
             "администратор.\n\n"
             "Что нужно сделать:\n"
-            "1. Откройте канал → <b>Управление каналом</b> → <b>Администраторы</b>\n"
+            "1. Откройте настройки чата → <b>Администраторы</b>\n"
             "2. Найдите бота в списке участников и повысьте до администратора\n"
             "(конкретные права роли значения не имеют — важен сам статус "
             "администратора, без него Telegram не присылает боту события "
@@ -147,7 +153,7 @@ async def register_channel_subscription(message: Message, channel_id: int, chann
 
     if await is_already_subscribed(channel_id, user_id):
         await message.answer(
-            f"Вы уже подписаны на уведомления канала «<b>{safe_title}</b>».",
+            f"Вы уже подписаны на уведомления в {chat_kind} «<b>{safe_title}</b>».",
             parse_mode="HTML",
         )
         return
@@ -155,7 +161,7 @@ async def register_channel_subscription(message: Message, channel_id: int, chann
     await add_subscription(channel_id, user_id)
     await message.answer(
         f"✅ Готово! Теперь вы будете получать уведомления о новых "
-        f"подписчиках канала «<b>{safe_title}</b>».",
+        f"участниках в {chat_kind} «<b>{safe_title}</b>».",
         parse_mode="HTML",
     )
 
@@ -181,10 +187,17 @@ async def cmd_start(message: Message):
 @dp.message(F.forward_from_chat)
 async def on_forwarded_message(message: Message):
     chat = message.forward_from_chat
-    if chat.type != "channel":
-        await message.answer("Это сообщение переслано не из канала.")
+
+    if chat.type not in ("channel", "group", "supergroup"):
+        await message.answer("Это сообщение переслано не из канала или группы.")
         return
-    await register_channel_subscription(message, chat.id, chat.title)
+
+    await register_chat_subscription(
+        message,
+        chat.id,
+        chat.title or "Без названия",
+        chat.type,
+    )
 
 
 @dp.message(F.text.contains("t.me/"))
@@ -209,19 +222,24 @@ async def on_channel_link(message: Message):
         )
         return
 
-    if chat.type != "channel":
-        await message.answer("Эта ссылка ведёт не на канал.")
+    if chat.type not in ("channel", "group", "supergroup"):
+        await message.answer("Эта ссылка ведёт не на канал или группу.")
         return
 
-    await register_channel_subscription(message, chat.id, chat.title)
+    await register_chat_subscription(
+        message,
+        chat.id,
+        chat.title or "Без названия",
+        chat.type,
+    )
 
 
 @dp.message()
 async def on_other_message(message: Message):
     await message.answer(
-        "Чтобы подписаться на уведомления канала, перешлите мне сюда "
-        "любое сообщение из этого канала, либо пришлите ссылку на "
-        "публичный канал вида <code>https://t.me/username</code>.",
+        "Чтобы подписаться на уведомления, перешлите мне сюда "
+        "любое сообщение из канала или группы, либо пришлите ссылку на "
+        "публичный канал или группу вида <code>https://t.me/username</code>.",
         parse_mode="HTML",
     )
 
@@ -230,28 +248,51 @@ async def on_other_message(message: Message):
 # Событие "новый подписчик канала"
 # ---------------------------------------------------------------------
 
-def is_new_join(update: ChatMemberUpdated) -> bool:
+def get_member_event(update: ChatMemberUpdated) -> str | None:
     old_status = update.old_chat_member.status
     new_status = update.new_chat_member.status
 
     was_outside = old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
-    now_inside = new_status == ChatMemberStatus.MEMBER
+    now_inside = new_status in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
+    )
 
-    return was_outside and now_inside
+    # Вступление: участник был вне чата и стал участником/администратором.
+    if was_outside and now_inside:
+        return "join"
+
+    # Выход/отписка: участник был внутри и стал LEFT.
+    if new_status == ChatMemberStatus.LEFT and old_status not in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    ):
+        return "leave"
+
+    # Исключение/бан — тоже считаем покиданием для уведомления.
+    if new_status == ChatMemberStatus.KICKED and old_status not in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    ):
+        return "leave"
+
+    return None
 
 
 @dp.chat_member()
 async def on_channel_member_update(update: ChatMemberUpdated):
-    if not is_new_join(update):
+    event = get_member_event(update)
+    if event is None:
         return
 
-    channel_id = update.chat.id
-    recipients = await get_subscribers(channel_id)
+    chat_id = update.chat.id
+    recipients = await get_subscribers(chat_id)
 
     if not recipients:
         logging.info(
-            "Для канала %s (%s) нет подписчиков на уведомления — пропускаем",
-            channel_id,
+            "Для чата %s (%s) нет подписчиков на уведомления — пропускаем",
+            chat_id,
             update.chat.title,
         )
         return
@@ -260,12 +301,32 @@ async def on_channel_member_update(update: ChatMemberUpdated):
     username = f"@{user.username}" if user.username else "(нет юзернейма)"
     full_name = html_escape(user.full_name or "—")
 
+    chat_type = update.chat.type
+
+    if chat_type == "channel":
+        chat_label = "Канал"
+        if event == "join":
+            title = "🔔 <b>Новый подписчик канала!</b>"
+            action = "подписался на канал"
+        else:
+            title = "🔕 <b>Подписчик отписался от канала!</b>"
+            action = "отписался от канала"
+    else:
+        chat_label = "Группа"
+        if event == "join":
+            title = "🔔 <b>Новый участник группы!</b>"
+            action = "вступил в группу"
+        else:
+            title = "🔕 <b>Участник покинул группу!</b>"
+            action = "покинул группу"
+
     text = (
-        "🔔 <b>Новый подписчик канала!</b>\n\n"
+        f"{title}\n\n"
         f"Имя: {full_name}\n"
         f"Username: {username}\n"
         f"ID: <code>{user.id}</code>\n"
-        f"Канал: {html_escape(update.chat.title)}"
+        f"{chat_label}: {html_escape(update.chat.title or 'Без названия')}\n"
+        f"Действие: {action}"
     )
 
     for recipient_id in recipients:
@@ -291,7 +352,6 @@ async def on_startup(app: web.Application):
                 allowed_updates=["message", "chat_member"],
             )
             logging.info("Webhook установлен: %s", WEBHOOK_URL)
-            logging.info("Бот готов принимать обновления через webhook")
             return
         except TelegramRetryAfter as e:
             wait = e.retry_after + 2
@@ -303,8 +363,7 @@ async def on_startup(app: web.Application):
 
 async def on_shutdown(app: web.Application):
     # Не удаляем webhook при остановке Render.
-    # Telegram продолжит хранить webhook и сможет доставить обновления
-    # после следующего запуска сервиса.
+    # Telegram продолжит хранить webhook после остановки сервиса.
     if http_session is not None:
         await http_session.close()
 

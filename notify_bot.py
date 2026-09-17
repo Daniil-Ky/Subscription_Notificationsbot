@@ -291,6 +291,7 @@ async def on_startup(app: web.Application):
                 allowed_updates=["message", "chat_member"],
             )
             logging.info("Webhook установлен: %s", WEBHOOK_URL)
+            logging.info("Бот готов принимать обновления через webhook")
             return
         except TelegramRetryAfter as e:
             wait = e.retry_after + 2
@@ -301,7 +302,9 @@ async def on_startup(app: web.Application):
 
 
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
+    # Не удаляем webhook при остановке Render.
+    # Telegram продолжит хранить webhook и сможет доставить обновления
+    # после следующего запуска сервиса.
     if http_session is not None:
         await http_session.close()
 

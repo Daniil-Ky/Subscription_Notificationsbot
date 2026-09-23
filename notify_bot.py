@@ -372,7 +372,7 @@ async def cmd_referrals(message: Message):
     await message.answer("Меню системы реферальных ссылок:", reply_markup=build_referral_menu())
 
 
-@dp.callback_query(F.data.startswith("ref_") | F.data == "admin_cancel")
+@dp.callback_query((F.data.startswith("ref_")) | (F.data == "admin_cancel"))
 async def on_admin_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not is_admin(user_id):

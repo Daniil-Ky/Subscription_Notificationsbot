@@ -59,7 +59,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import ChatMemberUpdated, Message, CallbackQuery
+from aiogram.types import (
+    ChatMemberUpdated,
+    Message,
+    CallbackQuery,
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -311,13 +318,35 @@ async def cmd_start(message: Message, command: CommandObject):
     await message.answer(
         "👋 <b>Привет!</b> Я уведомляю о новых подписчиках канала.\n\n"
         f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n\n"
-        "<b>Чтобы подключить канал или группу:</b>\n"
-        "1. Добавьте меня в канал или группу как администратора.\n"
-        "2. Перешлите мне сюда любое сообщение из этого канала или группы "
-        "(или пришлите ссылку вида <code>https://t.me/username</code>, "
-        "если канал публичный).",
+        "<b>Чтобы подключить канал:</b>\n"
+        "1. Добавьте меня в канал как администратора.\n"
+        "2. Перешлите мне сюда любое сообщение из этого канала (или "
+        "пришлите ссылку вида <code>https://t.me/username</code>, если "
+        "канал публичный).\n\n"
+        "<b>Чтобы подключить группу:</b>\n"
+        "1. Добавьте меня в группу как администратора.\n"
+        "2. Прямо в этой группе (не в личке!) напишите команду /connect — "
+        "она подпишет вас на уведомления именно по этой группе. Пересылка "
+        "сообщений для групп не работает (Telegram не передаёт по ним "
+        "данные о самой группе), а ссылка нужна только для публичных "
+        "групп — поэтому для приватных групп это единственный способ.",
         parse_mode="HTML",
     )
+
+
+@dp.message(Command("connect"))
+async def cmd_connect_group(message: Message):
+    chat = message.chat
+
+    if chat.type not in ("group", "supergroup"):
+        await message.answer(
+            "Эту команду нужно вводить <b>прямо в группе</b>, которую вы "
+            "хотите подключить, а не в личке со мной.",
+            parse_mode="HTML",
+        )
+        return
+
+    await register_chat_subscription(message, chat.id, chat.title or "Без названия", chat.type)
 
 
 @dp.message(Command("broadcast"))
@@ -598,6 +627,22 @@ async def on_channel_member_update(update: ChatMemberUpdated):
 # Веб-сервер и вебхук
 # ---------------------------------------------------------------------
 
+async def register_bot_commands():
+    private_commands = [
+        BotCommand(command="start", description="Начало работы, показать мой ID"),
+    ]
+    group_commands = [
+        BotCommand(command="connect", description="Подключить эту группу к уведомлениям"),
+        BotCommand(command="start", description="Показать мой Telegram ID"),
+    ]
+    try:
+        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+        logging.info("Списки команд для личных чатов и групп зарегистрированы")
+    except Exception as e:
+        logging.warning("Не удалось зарегистрировать списки команд: %s", e)
+
+
 async def on_startup(app: web.Application):
     global http_session
     http_session = ClientSession()
@@ -610,6 +655,7 @@ async def on_startup(app: web.Application):
                 allowed_updates=["message", "chat_member"],
             )
             logging.info("Webhook установлен: %s", WEBHOOK_URL)
+            await register_bot_commands()
             return
         except TelegramRetryAfter as e:
             wait = e.retry_after + 2

@@ -66,6 +66,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeAllGroupChats,
+    BotCommandScopeChat,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -136,7 +137,53 @@ async def get_subscribers(channel_id: int) -> list[int]:
     async with http_session.get(url, headers=SUPABASE_HEADERS, params=params) as resp:
         resp.raise_for_status()
         data = await resp.json()
-        return [row["user_id"] for row in data]
+    subscribers = [row["user_id"] for row in data]
+    if not subscribers:
+        return []
+    muted_url = f"{SUPABASE_URL}/rest/v1/muted_subscriptions"
+    muted_params = {"channel_id": f"eq.{channel_id}", "user_id": "in.(" + ",".join(map(str, subscribers)) + ")", "select": "user_id"}
+    async with http_session.get(muted_url, headers=SUPABASE_HEADERS, params=muted_params) as resp:
+        resp.raise_for_status()
+        muted = {row["user_id"] for row in await resp.json()}
+    return [user_id for user_id in subscribers if user_id not in muted]
+
+
+async def get_user_subscriptions(user_id: int) -> list[int]:
+    url = f"{SUPABASE_URL}/rest/v1/subscriptions"
+    params = {"user_id": f"eq.{user_id}", "select": "channel_id"}
+    async with http_session.get(url, headers=SUPABASE_HEADERS, params=params) as resp:
+        resp.raise_for_status()
+        return [row["channel_id"] for row in await resp.json()]
+
+
+async def set_muted(channel_id: int, user_id: int, muted: bool) -> None:
+    url = f"{SUPABASE_URL}/rest/v1/muted_subscriptions"
+    params = {"channel_id": f"eq.{channel_id}", "user_id": f"eq.{user_id}"}
+    if muted:
+        headers = {**SUPABASE_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"}
+        async with http_session.post(url, headers=headers, params={"on_conflict": "channel_id,user_id"}, json={"channel_id": channel_id, "user_id": user_id}) as resp:
+            resp.raise_for_status()
+    else:
+        async with http_session.delete(url, headers=SUPABASE_HEADERS, params=params) as resp:
+            resp.raise_for_status()
+
+
+async def delete_user_subscription(channel_id: int, user_id: int) -> None:
+    url = f"{SUPABASE_URL}/rest/v1/subscriptions"
+    async with http_session.delete(url, headers=SUPABASE_HEADERS, params={"channel_id": f"eq.{channel_id}", "user_id": f"eq.{user_id}"}) as resp:
+        resp.raise_for_status()
+    await set_muted(channel_id, user_id, False)
+
+
+async def delete_all_user_subscriptions(user_id: int) -> int:
+    channels = await get_user_subscriptions(user_id)
+    url = f"{SUPABASE_URL}/rest/v1/subscriptions"
+    async with http_session.delete(url, headers=SUPABASE_HEADERS, params={"user_id": f"eq.{user_id}"}) as resp:
+        resp.raise_for_status()
+    muted_url = f"{SUPABASE_URL}/rest/v1/muted_subscriptions"
+    async with http_session.delete(muted_url, headers=SUPABASE_HEADERS, params={"user_id": f"eq.{user_id}"}) as resp:
+        resp.raise_for_status()
+    return len(channels)
 
 
 # ---------------------------------------------------------------------
@@ -155,6 +202,26 @@ async def record_bot_user(user_id: int, referral_code: str | None = None) -> Non
         async with http_session.post(url, headers=headers, params=params, json=payload) as resp:
             if resp.status >= 400:
                 logging.warning("record_bot_user: %s", await resp.text())
+                return
+
+        # Если пользователь уже существовал и ранее заходил без реферала,
+        # привязываем первый переданный реферальный код. Уже установленный
+        # код не перезаписываем.
+        if referral_code:
+            patch_url = f"{SUPABASE_URL}/rest/v1/bot_users"
+            patch_params = {
+                "bot_name": f"eq.{BOT_NAME}",
+                "user_id": f"eq.{user_id}",
+                "referral_code": "is.null",
+            }
+            async with http_session.patch(
+                patch_url,
+                headers=SUPABASE_HEADERS,
+                params=patch_params,
+                json={"referral_code": referral_code},
+            ) as patch_resp:
+                if patch_resp.status >= 400:
+                    logging.warning("record_bot_user referral update: %s", await patch_resp.text())
     except Exception as e:
         logging.warning("record_bot_user exception: %s", e)
 
@@ -212,9 +279,15 @@ async def delete_referral_link(code: str) -> bool:
 
 
 def extract_ref_code(text: str) -> str:
+    """Получить код из кода, ссылки ?start=CODE или старого ref_CODE."""
     text = text.strip()
-    if "ref_" in text:
-        return text.split("ref_", 1)[1].split("&")[0].strip()
+    if "?start=" in text:
+        text = text.split("?start=", 1)[1].split("&", 1)[0].strip()
+    elif text.startswith("start="):
+        text = text.split("=", 1)[1].split("&", 1)[0].strip()
+    elif text.startswith("ref_"):
+        # Совместимость со старыми ссылками, созданными предыдущей версией.
+        text = text[len("ref_"):].strip()
     return text
 
 
@@ -310,9 +383,9 @@ async def register_chat_subscription(
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
-    referral_code = None
-    if command.args and command.args.startswith("ref_"):
-        referral_code = command.args[len("ref_"):]
+    # Весь аргумент после /start считаем реферальным кодом.
+    # Префикс ref_ больше не требуется.
+    referral_code = command.args.strip() if command.args else None
     await record_bot_user(message.from_user.id, referral_code)
 
     await message.answer(
@@ -332,6 +405,55 @@ async def cmd_start(message: Message, command: CommandObject):
         "групп — поэтому для приватных групп это единственный способ.",
         parse_mode="HTML",
     )
+
+
+@dp.message(Command("mute"))
+async def cmd_mute(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    arg = (command.args or "").strip().lower()
+    if message.chat.type in ("group", "supergroup"):
+        await set_muted(message.chat.id, user_id, True)
+        await message.answer("🔕 Уведомления в этой группе отключены. Включить: /unmute")
+        return
+    if arg == "all":
+        channels = await get_user_subscriptions(user_id)
+        for channel_id in channels:
+            await set_muted(channel_id, user_id, True)
+        await message.answer(f"🔕 Уведомления отключены для всех подключённых чатов ({len(channels)}). Включить: /unmute all")
+        return
+    await message.answer("Использование:\n/mute — отключить уведомления в текущей группе\n/mute all — отключить уведомления во всех подключённых чатах")
+
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    arg = (command.args or "").strip().lower()
+    if message.chat.type in ("group", "supergroup"):
+        await set_muted(message.chat.id, user_id, False)
+        await message.answer("🔔 Уведомления в этой группе снова включены.")
+        return
+    if arg == "all":
+        channels = await get_user_subscriptions(user_id)
+        for channel_id in channels:
+            await set_muted(channel_id, user_id, False)
+        await message.answer(f"🔔 Уведомления снова включены для всех подключённых чатов ({len(channels)}).")
+        return
+    await message.answer("Использование:\n/unmute — включить уведомления в текущей группе\n/unmute all — включить уведомления во всех подключённых чатах")
+
+
+@dp.message(Command("del"))
+async def cmd_delete_subscription(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    arg = (command.args or "").strip().lower()
+    if arg == "all":
+        count = await delete_all_user_subscriptions(user_id)
+        await message.answer(f"🗑 Полное отключение выполнено. Удалено подписок: {count}. Чтобы получать уведомления снова, подключите чаты заново.")
+        return
+    if message.chat.type in ("group", "supergroup"):
+        await delete_user_subscription(message.chat.id, user_id)
+        await message.answer("🗑 Подписка на уведомления этой группы удалена. Для повторного подключения используйте /connect.")
+        return
+    await message.answer("Чтобы отключить только один чат, отправьте /del прямо в этой группе. Для полного отключения всех чатов используйте /del all.")
 
 
 @dp.message(Command("connect"))
@@ -451,7 +573,7 @@ async def on_admin_text_input(message: Message):
             return
         await create_referral_link(text)
         bot_info = await bot.me()
-        link = f"https://t.me/{bot_info.username}?start=ref_{text}"
+        link = f"https://t.me/{bot_info.username}?start={text}"
         await message.answer(f"Ссылка создана:\n{link}", reply_markup=build_back_exit_kb())
 
     elif state == "ref_delete":
@@ -630,15 +752,34 @@ async def on_channel_member_update(update: ChatMemberUpdated):
 async def register_bot_commands():
     private_commands = [
         BotCommand(command="start", description="Начало работы, показать мой ID"),
+        BotCommand(command="mute", description="Отключить уведомления"),
+        BotCommand(command="unmute", description="Включить уведомления"),
+        BotCommand(command="del", description="Удалить подписку"),
+    ]
+    admin_commands = [
+        BotCommand(command="start", description="Начало работы, показать мой ID"),
+        BotCommand(command="mute", description="Отключить уведомления"),
+        BotCommand(command="unmute", description="Включить уведомления"),
+        BotCommand(command="del", description="Удалить подписку"),
+        BotCommand(command="broadcast", description="Сделать рассылку"),
+        BotCommand(command="referrals", description="Управление реферальными ссылками"),
     ]
     group_commands = [
         BotCommand(command="connect", description="Подключить эту группу к уведомлениям"),
+        BotCommand(command="mute", description="Отключить уведомления в группе"),
+        BotCommand(command="unmute", description="Включить уведомления в группе"),
+        BotCommand(command="del", description="Удалить подписку на группу"),
         BotCommand(command="start", description="Показать мой Telegram ID"),
     ]
     try:
         await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+        if ADMIN_ID:
+            await bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+            )
         await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
-        logging.info("Списки команд для личных чатов и групп зарегистрированы")
+        logging.info("Списки команд для личных чатов, администратора и групп зарегистрированы")
     except Exception as e:
         logging.warning("Не удалось зарегистрировать списки команд: %s", e)
 
